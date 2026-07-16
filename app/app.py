@@ -74,7 +74,10 @@ def export_csv(companies: list[dict], emails: dict[str, str]) -> bytes:
     writer.writeheader()
     for company in companies:
         for founder in company["founders"]:
-            writer.writerow({"company": company["name"], "founder_name": founder["name"], "email": emails.get(founder_id(company["name"], founder), ""), "linkedin": founder["linkedin"], "one_liner": company.get("one_liner", ""), "batch": company.get("batch", ""), "yc_url": company.get("yc_url", "")})
+            email = emails.get(founder_id(company["name"], founder), "").strip()
+            if not email:
+                continue
+            writer.writerow({"company": company["name"], "founder_name": founder["name"], "email": email, "linkedin": founder["linkedin"], "one_liner": company.get("one_liner", ""), "batch": company.get("batch", ""), "yc_url": company.get("yc_url", "")})
     return output.getvalue().encode("utf-8-sig")
 
 
