@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 from supabase import Client, create_client
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,12 +38,33 @@ def founder_id(company: str, founder: dict) -> str:
 
 
 def copy_button(url: str, key: str) -> None:
-    st.html(f"""<button id='{key}'>Copy link</button><script>
-const b=document.getElementById('{key}'); b.onclick=async()=>{{let ok=false;
-try{{await navigator.clipboard.writeText({json.dumps(url)});ok=true;}}catch(e){{}}
-if(!ok){{const x=document.createElement('textarea');x.value={json.dumps(url)};document.body.appendChild(x);x.select();ok=document.execCommand('copy');x.remove();}}
-b.textContent=ok?'Link copied':'Copy failed';setTimeout(()=>b.textContent='Copy link',1800);}};
-</script>""")
+    value = json.dumps(url)
+    components.html(f"""
+    <button id="{key}" style="border:1px solid #c8cdd5;border-radius:6px;background:white;padding:5px 10px;cursor:pointer">Copy link</button>
+    <script>
+    const button = document.getElementById("{key}");
+    button.addEventListener("click", async () => {{
+        let copied = false;
+        try {{
+            await navigator.clipboard.writeText({value});
+            copied = true;
+        }} catch (error) {{}}
+        if (!copied) {{
+            const area = document.createElement("textarea");
+            area.value = {value};
+            area.style.position = "fixed";
+            area.style.opacity = "0";
+            document.body.appendChild(area);
+            area.focus();
+            area.select();
+            copied = document.execCommand("copy");
+            area.remove();
+        }}
+        button.textContent = copied ? "Link copied" : "Copy failed";
+        setTimeout(() => button.textContent = "Copy link", 1800);
+    }});
+    </script>
+    """, height=42)
 
 
 def export_csv(companies: list[dict], emails: dict[str, str]) -> bytes:
