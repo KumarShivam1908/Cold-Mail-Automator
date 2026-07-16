@@ -65,9 +65,12 @@ def login(client: Client) -> None:
     if st.button(mode, type="primary"):
         try:
             result = client.auth.sign_in_with_password({"email": email, "password": password}) if mode == "Sign in" else client.auth.sign_up({"email": email, "password": password})
-            if result.user:
+            if result.user and result.session:
                 st.session_state.user = result.user
+                st.session_state.session = result.session
                 st.rerun()
+            elif result.user:
+                st.success("Account created. Confirm your email, then sign in.")
         except Exception as error:
             st.error(str(error))
 
@@ -77,6 +80,10 @@ client = get_client()
 if "user" not in st.session_state:
     login(client)
     st.stop()
+
+session = st.session_state.get("session")
+if session:
+    client.auth.set_session(session.access_token, session.refresh_token)
 
 user_id = st.session_state.user.id
 progress = client.table("founder_progress").select("founder_id,email").eq("user_id", user_id).execute().data
@@ -131,7 +138,11 @@ with st.sidebar:
                 st.rerun()
 
 company = filtered[selected]
-client.table("user_state").upsert({"user_id": user_id, "current_company_id": company["name"]}).execute()
+try:
+    client.table("user_state").upsert({"user_id": user_id, "current_company_id": company["name"]}).execute()
+except Exception:
+    # Resume state is optional; email progress must remain usable if this table's policy is unavailable.
+    pass
 st.subheader(company["name"])
 st.caption(" · ".join(value for value in (company.get("batch"), company.get("yc_url")) if value))
 if company.get("one_liner"):
