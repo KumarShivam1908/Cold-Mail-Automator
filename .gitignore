@@ -7,3 +7,5 @@ __pycache__/
 data/*.json
 data/*.csv
 playwright-report/
+app/progress.db
+.streamlit/secrets.toml

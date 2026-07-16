@@ -1,5 +1,14 @@
 # YC Founder Email Review
 
+This version uses Supabase Auth and PostgreSQL. Add these secrets locally in `.streamlit/secrets.toml` (never commit that file):
+
+```toml
+SUPABASE_URL = "https://your-project.supabase.co"
+SUPABASE_KEY = "your-publishable-key"
+```
+
+On Streamlit Community Cloud, paste the same values into the app's Secrets settings.
+
 From the project root, install Streamlit and run:
 
 ```powershell

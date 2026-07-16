@@ -4,140 +4,157 @@ import csv
 import hashlib
 import io
 import json
-import sqlite3
 from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
-
+from supabase import Client, create_client
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "outputs" / "yc-founders.json"
-DB = Path(__file__).resolve().parent / "progress.db"
+
+
+def get_client() -> Client:
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 
 def load_companies() -> list[dict]:
     with SOURCE.open(encoding="utf-8") as handle:
         records = json.load(handle)
-    grouped: dict[str, dict] = {}
+    grouped = {}
     for record in records:
-        company = grouped.setdefault(
-            record["name"],
-            {key: record.get(key) for key in ("name", "batch", "yc_url", "website", "one_liner", "description")}
-            | {"founders": []},
-        )
+        company = grouped.setdefault(record["name"], {key: record.get(key) for key in ("name", "batch", "yc_url", "website", "one_liner", "description")} | {"founders": []})
         seen = {(f["name"], f.get("linkedin")) for f in company["founders"]}
         for founder in record.get("founders", []):
-            key = (founder.get("name", "").strip(), founder.get("linkedin"))
-            if key not in seen:
-                company["founders"].append({"name": key[0], "linkedin": key[1]})
-                seen.add(key)
+            item = {"name": founder.get("name", "").strip(), "linkedin": founder.get("linkedin") or ""}
+            if (item["name"], item["linkedin"]) not in seen:
+                company["founders"].append(item)
+                seen.add((item["name"], item["linkedin"]))
     return sorted(grouped.values(), key=lambda item: item["name"].lower())
 
 
 def founder_id(company: str, founder: dict) -> str:
-    value = f"{company}|{founder.get('linkedin') or founder.get('name', '')}"
-    return hashlib.sha256(value.encode()).hexdigest()
-
-
-def init_db() -> sqlite3.Connection:
-    connection = sqlite3.connect(DB)
-    connection.execute("CREATE TABLE IF NOT EXISTS emails (founder_id TEXT PRIMARY KEY, email TEXT NOT NULL)")
-    connection.commit()
-    return connection
-
-
-def saved_emails(connection: sqlite3.Connection) -> dict[str, str]:
-    return dict(connection.execute("SELECT founder_id, email FROM emails"))
+    return hashlib.sha256(f"{company}|{founder.get('linkedin') or founder['name']}".encode()).hexdigest()
 
 
 def copy_button(url: str, key: str) -> None:
-    safe_url = json.dumps(url)
-    components.html(
-        f"""<button onclick='navigator.clipboard.writeText({safe_url})'
-        style='border:1px solid #c8cdd5;border-radius:6px;background:white;padding:5px 10px;cursor:pointer'>Copy link</button>""",
-        height=38,
-    )
+    st.html(f"""<button id='{key}'>Copy link</button><script>
+const b=document.getElementById('{key}'); b.onclick=async()=>{{let ok=false;
+try{{await navigator.clipboard.writeText({json.dumps(url)});ok=true;}}catch(e){{}}
+if(!ok){{const x=document.createElement('textarea');x.value={json.dumps(url)};document.body.appendChild(x);x.select();ok=document.execCommand('copy');x.remove();}}
+b.textContent=ok?'Link copied':'Copy failed';setTimeout(()=>b.textContent='Copy link',1800);}};
+</script>""")
 
 
-def csv_bytes(companies: list[dict], emails: dict[str, str]) -> bytes:
+def export_csv(companies: list[dict], emails: dict[str, str]) -> bytes:
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=["company", "founder_name", "email", "linkedin", "one_liner", "batch", "yc_url"])
+    fields = ["company", "founder_name", "email", "linkedin", "one_liner", "batch", "yc_url"]
+    writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()
     for company in companies:
         for founder in company["founders"]:
-            writer.writerow(
-                {
-                    "company": company["name"],
-                    "founder_name": founder["name"],
-                    "email": emails.get(founder_id(company["name"], founder), ""),
-                    "linkedin": founder.get("linkedin") or "",
-                    "one_liner": company.get("one_liner") or "",
-                    "batch": company.get("batch") or "",
-                    "yc_url": company.get("yc_url") or "",
-                }
-            )
+            writer.writerow({"company": company["name"], "founder_name": founder["name"], "email": emails.get(founder_id(company["name"], founder), ""), "linkedin": founder["linkedin"], "one_liner": company.get("one_liner", ""), "batch": company.get("batch", ""), "yc_url": company.get("yc_url", "")})
     return output.getvalue().encode("utf-8-sig")
 
 
-st.set_page_config(page_title="YC Founder Email Review", page_icon="✉", layout="wide")
-st.title("YC Founder Email Review")
-st.caption("Work through one company at a time. Your progress is saved locally in SQLite.")
+def login(client: Client) -> None:
+    st.title("YC Founder Email Review")
+    st.caption("Sign in to save your progress across devices.")
+    mode = st.radio("Account", ["Sign in", "Create account"], horizontal=True)
+    email = st.text_input("Email")
+    password = st.text_input("Password", type="password")
+    if st.button(mode, type="primary"):
+        try:
+            result = client.auth.sign_in_with_password({"email": email, "password": password}) if mode == "Sign in" else client.auth.sign_up({"email": email, "password": password})
+            if result.user:
+                st.session_state.user = result.user
+                st.rerun()
+        except Exception as error:
+            st.error(str(error))
 
-companies = load_companies()
-connection = init_db()
-emails = saved_emails(connection)
+
+st.set_page_config(page_title="YC Founder Email Review", page_icon="✉", layout="wide")
+client = get_client()
+if "user" not in st.session_state:
+    login(client)
+    st.stop()
+
+user_id = st.session_state.user.id
+progress = client.table("founder_progress").select("founder_id,email").eq("user_id", user_id).execute().data
+emails = {row["founder_id"]: row["email"] for row in progress}
+custom = client.table("custom_companies").select("data").eq("user_id", user_id).execute().data
+companies = load_companies() + [row["data"] for row in custom]
+state = client.table("user_state").select("current_company_id").eq("user_id", user_id).execute().data
+last_company = state[0]["current_company_id"] if state else None
 
 with st.sidebar:
-    st.header("Find a company")
-    search = st.text_input("Search", placeholder="Company or founder")
+    st.caption(st.session_state.user.email)
+    if st.button("Sign out"):
+        client.auth.sign_out()
+        st.session_state.clear()
+        st.rerun()
+    search = st.text_input("Search company or founder")
     status = st.radio("Show", ["All", "Needs email", "Completed"], horizontal=True)
     filtered = []
     for company in companies:
+        complete = all(emails.get(founder_id(company["name"], founder), "").strip() for founder in company["founders"])
         matches = not search or search.lower() in json.dumps(company).lower()
-        filled = all(emails.get(founder_id(company["name"], founder), "").strip() for founder in company["founders"])
-        status_match = status == "All" or (status == "Completed" and filled) or (status == "Needs email" and not filled)
-        if matches and status_match:
+        visible = status == "All" or (status == "Completed" and complete) or (status == "Needs email" and not complete)
+        if matches and visible:
             filtered.append(company)
-    st.caption(f"{len(filtered)} of {len(companies)} companies")
     if not filtered:
         st.warning("No companies match this filter.")
         st.stop()
-    labels = [f"{company['name']} ({sum(bool(emails.get(founder_id(company['name'], f), '').strip()) for f in company['founders'])}/{len(company['founders'])})" for company in filtered]
-    selected = st.selectbox("Company", range(len(filtered)), format_func=lambda index: labels[index])
-    st.divider()
-    st.download_button("Download founder CSV", csv_bytes(companies, emails), "yc-founders-with-emails.csv", "text/csv", use_container_width=True)
+    labels = [f"{c['name']} ({sum(bool(emails.get(founder_id(c['name'], f), '').strip()) for f in c['founders'])}/{len(c['founders'])})" for c in filtered]
+    default = next((i for i, c in enumerate(filtered) if c["name"] == last_company), 0)
+    selected = st.selectbox("Company", range(len(filtered)), index=default, format_func=lambda i: labels[i])
+    st.download_button("Download my CSV", export_csv(companies, emails), "yc-founders-with-emails.csv", "text/csv", use_container_width=True)
+    with st.expander("Add a company"):
+        with st.form("add-company"):
+            name = st.text_input("Company name")
+            one_liner = st.text_input("One-liner")
+            batch = st.text_input("Batch")
+            yc_url = st.text_input("YC URL")
+            founder_lines = st.text_area("Founders", placeholder="Name | LinkedIn URL")
+            add = st.form_submit_button("Add company")
+        if add:
+            founders = []
+            for line in founder_lines.splitlines():
+                founder_name, separator, linkedin = line.partition("|")
+                if founder_name.strip():
+                    founders.append({"name": founder_name.strip(), "linkedin": linkedin.strip() if separator else ""})
+            if not name.strip() or not founders:
+                st.error("Company name and one founder are required.")
+            else:
+                data = {"name": name.strip(), "one_liner": one_liner.strip(), "batch": batch.strip(), "yc_url": yc_url.strip(), "website": "", "description": "", "founders": founders}
+                company_id = hashlib.sha256(f"{user_id}|{name.strip()}".encode()).hexdigest()
+                client.table("custom_companies").upsert({"user_id": user_id, "company_id": company_id, "data": data}).execute()
+                st.rerun()
 
 company = filtered[selected]
+client.table("user_state").upsert({"user_id": user_id, "current_company_id": company["name"]}).execute()
 st.subheader(company["name"])
-meta = " · ".join(value for value in (company.get("batch"), company.get("yc_url")) if value)
-st.caption(meta)
+st.caption(" · ".join(value for value in (company.get("batch"), company.get("yc_url")) if value))
 if company.get("one_liner"):
     st.info(company["one_liner"])
-if company.get("description") and company.get("description") != company.get("one_liner"):
+if company.get("description"):
     with st.expander("Company details"):
         st.write(company["description"])
 
-st.markdown("#### Founders")
 with st.form(f"company-{selected}"):
-    pending: dict[str, str] = {}
-    for index, founder in enumerate(company["founders"]):
+    pending = {}
+    for founder in company["founders"]:
         fid = founder_id(company["name"], founder)
         left, middle, right = st.columns([2.2, 4, 1.1])
         left.markdown(f"**{founder['name']}**")
-        linkedin = founder.get("linkedin") or ""
-        if linkedin:
-            middle.link_button("Open LinkedIn", linkedin, use_container_width=False)
-            copy_button(linkedin, f"copy-{fid}")
+        if founder["linkedin"]:
+            middle.link_button("Open LinkedIn", founder["linkedin"])
+            copy_button(founder["linkedin"], f"copy-{fid}")
         else:
             middle.caption("No LinkedIn link found")
         pending[fid] = right.text_input("Email", value=emails.get(fid, ""), key=f"email-{fid}", label_visibility="collapsed", placeholder="founder@company.com")
     submitted = st.form_submit_button("Save company progress", type="primary", use_container_width=True)
-
 if submitted:
-    connection.executemany("INSERT INTO emails(founder_id, email) VALUES (?, ?) ON CONFLICT(founder_id) DO UPDATE SET email=excluded.email", [(fid, email.strip()) for fid, email in pending.items()])
-    connection.commit()
+    for fid, email in pending.items():
+        client.table("founder_progress").upsert({"user_id": user_id, "founder_id": fid, "email": email.strip()}).execute()
     st.success("Progress saved.")
     st.rerun()
-
-connection.close()
