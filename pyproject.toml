@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yc-founder-scraper"
+version = "0.1.0"
+description = "Extract public YC company and founder data from the YC directory."
+requires-python = ">=3.11"
+dependencies = ["streamlit>=1.37,<2"]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.45,<2"]
+dev = []
+
+[project.scripts]
+yc-scrape = "yc_scraper.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

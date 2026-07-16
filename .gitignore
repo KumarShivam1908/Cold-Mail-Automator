@@ -1,0 +1,9 @@
+.venv/
+.venv2/
+work/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/*.json
+data/*.csv
+playwright-report/
