@@ -137,7 +137,8 @@ with st.sidebar:
         st.warning("No companies match this filter.")
         st.stop()
     labels = [f"{c['name']} ({sum(bool(emails.get(founder_id(c['name'], f), '').strip()) for f in c['founders'])}/{len(c['founders'])})" for c in filtered]
-    default = next((i for i, c in enumerate(filtered) if c["name"] == last_company), 0)
+    requested_company = st.session_state.pop("next_company", last_company)
+    default = next((i for i, c in enumerate(filtered) if c["name"] == requested_company), 0)
     selected = st.selectbox("Company", range(len(filtered)), index=default, format_func=lambda i: labels[i])
     st.download_button("Download my CSV", export_csv(companies, emails), "yc-founders-with-emails.csv", "text/csv", use_container_width=True)
     with st.expander("Add a company"):
@@ -188,9 +189,17 @@ with st.form(f"company-{selected}"):
         else:
             middle.caption("No LinkedIn link found")
         pending[fid] = right.text_input("Email", value=emails.get(fid, ""), key=f"email-{fid}", label_visibility="collapsed", placeholder="founder@company.com")
-    submitted = st.form_submit_button("Save company progress", type="primary", use_container_width=True)
-if submitted:
+    save_col, next_col = st.columns(2)
+    with save_col:
+        submitted = st.form_submit_button("Save company progress", use_container_width=True)
+    with next_col:
+        save_next = st.form_submit_button("Save & next", type="primary", use_container_width=True)
+if submitted or save_next:
     for fid, email in pending.items():
         client.table("founder_progress").upsert({"user_id": user_id, "founder_id": fid, "email": email.strip()}).execute()
-    st.success("Progress saved.")
+    if save_next:
+        next_index = (selected + 1) % len(filtered)
+        st.session_state.next_company = filtered[next_index]["name"]
+    else:
+        st.success("Progress saved.")
     st.rerun()
