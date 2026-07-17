@@ -34,7 +34,8 @@ def load_companies() -> list[dict]:
 
 
 def founder_id(company: str, founder: dict) -> str:
-    return hashlib.sha256(f"{company}|{founder.get('linkedin') or founder['name']}".encode()).hexdigest()
+    source = founder.get("_source_id") or f"{company}|{founder.get('linkedin') or founder['name']}"
+    return hashlib.sha256(source.encode()).hexdigest()
 
 
 def copy_button(url: str, key: str) -> None:
@@ -67,15 +68,16 @@ def copy_button(url: str, key: str) -> None:
     """, height=42)
 
 
-def export_csv(companies: list[dict], emails: dict[str, str]) -> bytes:
+def export_csv(companies: list[dict], emails: dict[str, str], verified: dict[str, bool]) -> bytes:
     output = io.StringIO()
     fields = ["company", "founder_name", "email", "linkedin", "one_liner", "batch", "yc_url"]
     writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()
     for company in companies:
         for founder in company["founders"]:
-            email = emails.get(founder_id(company["name"], founder), "").strip()
-            if not email:
+            fid = founder_id(company["name"], founder)
+            email = emails.get(fid, "").strip()
+            if not email or not verified.get(fid, False):
                 continue
             writer.writerow({"company": company["name"], "founder_name": founder["name"], "email": email, "linkedin": founder["linkedin"], "one_liner": company.get("one_liner", ""), "batch": company.get("batch", ""), "yc_url": company.get("yc_url", "")})
     return output.getvalue().encode("utf-8-sig")
@@ -115,6 +117,19 @@ progress = client.table("founder_progress").select("founder_id,email").eq("user_
 emails = {row["founder_id"]: row["email"] for row in progress}
 custom = client.table("custom_companies").select("data").eq("user_id", user_id).execute().data
 companies = load_companies() + [row["data"] for row in custom]
+override_rows = client.table("founder_overrides").select("founder_id,name,linkedin,verified").eq("user_id", user_id).execute().data
+overrides = {row["founder_id"]: row for row in override_rows}
+verified = {}
+for item in companies:
+    for founder in item["founders"]:
+        source_id = founder_id(item["name"], founder)
+        founder["_source_id"] = source_id
+        if source_id in overrides:
+            founder["name"] = overrides[source_id]["name"]
+            founder["linkedin"] = overrides[source_id]["linkedin"]
+            verified[source_id] = overrides[source_id]["verified"]
+        else:
+            verified[source_id] = False
 state = client.table("user_state").select("current_company_id").eq("user_id", user_id).execute().data
 last_company = state[0]["current_company_id"] if state else None
 
@@ -128,7 +143,7 @@ with st.sidebar:
     status = st.radio("Show", ["All", "Needs email", "Completed"], horizontal=True)
     filtered = []
     for company in companies:
-        complete = all(emails.get(founder_id(company["name"], founder), "").strip() for founder in company["founders"])
+        complete = all(emails.get(founder_id(company["name"], founder), "").strip() and verified.get(founder_id(company["name"], founder), False) for founder in company["founders"])
         matches = not search or search.lower() in json.dumps(company).lower()
         visible = status == "All" or (status == "Completed" and complete) or (status == "Needs email" and not complete)
         if matches and visible:
@@ -136,11 +151,11 @@ with st.sidebar:
     if not filtered:
         st.warning("No companies match this filter.")
         st.stop()
-    labels = [f"{c['name']} ({sum(bool(emails.get(founder_id(c['name'], f), '').strip()) for f in c['founders'])}/{len(c['founders'])})" for c in filtered]
+    labels = [f"{c['name']} ({sum(bool(emails.get(founder_id(c['name'], f), '').strip()) and verified.get(founder_id(c['name'], f), False) for f in c['founders'])}/{len(c['founders'])})" for c in filtered]
     requested_company = st.session_state.pop("next_company", last_company)
     default = next((i for i, c in enumerate(filtered) if c["name"] == requested_company), 0)
     selected = st.selectbox("Company", range(len(filtered)), index=default, format_func=lambda i: labels[i])
-    st.download_button("Download my CSV", export_csv(companies, emails), "yc-founders-with-emails.csv", "text/csv", use_container_width=True)
+    st.download_button("Download my CSV", export_csv(companies, emails, verified), "yc-founders-with-emails.csv", "text/csv", use_container_width=True)
     with st.expander("Add a company"):
         with st.form("add-company"):
             name = st.text_input("Company name")
@@ -179,22 +194,27 @@ if company.get("description"):
 
 with st.form(f"company-{selected}"):
     pending = {}
+    corrections = {}
     for founder in company["founders"]:
         fid = founder_id(company["name"], founder)
-        left, middle, right = st.columns([2.2, 4, 1.1])
-        left.markdown(f"**{founder['name']}**")
-        if founder["linkedin"]:
-            middle.link_button("Open LinkedIn", founder["linkedin"])
-            copy_button(founder["linkedin"], f"copy-{fid}")
-        else:
-            middle.caption("No LinkedIn link found")
-        pending[fid] = right.text_input("Email", value=emails.get(fid, ""), key=f"email-{fid}", label_visibility="collapsed", placeholder="founder@company.com")
+        name_col, linkedin_col, email_col = st.columns([2, 3, 2])
+        edited_name = name_col.text_input("Founder name", value=founder["name"], key=f"name-{fid}")
+        edited_linkedin = linkedin_col.text_input("LinkedIn URL", value=founder.get("linkedin", ""), key=f"linkedin-{fid}")
+        pending[fid] = email_col.text_input("Email", value=emails.get(fid, ""), key=f"email-{fid}", placeholder="founder@company.com")
+        verify_col, link_col = st.columns([2, 5])
+        corrections[fid] = (edited_name.strip(), edited_linkedin.strip(), verify_col.checkbox("I verified this founder", value=verified.get(fid, False), key=f"verified-{fid}"))
+        if edited_linkedin.strip():
+            link_col.link_button("Open edited LinkedIn", edited_linkedin.strip())
+            copy_button(edited_linkedin.strip(), f"copy-{fid}")
+        st.divider()
     save_col, next_col = st.columns(2)
     with save_col:
         submitted = st.form_submit_button("Save company progress", use_container_width=True)
     with next_col:
         save_next = st.form_submit_button("Save & next", type="primary", use_container_width=True)
 if submitted or save_next:
+    for fid, (name, linkedin, is_verified) in corrections.items():
+        client.table("founder_overrides").upsert({"user_id": user_id, "founder_id": fid, "name": name, "linkedin": linkedin, "verified": is_verified}).execute()
     for fid, email in pending.items():
         client.table("founder_progress").upsert({"user_id": user_id, "founder_id": fid, "email": email.strip()}).execute()
     if save_next:
